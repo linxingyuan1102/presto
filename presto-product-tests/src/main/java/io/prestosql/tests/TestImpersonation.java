@@ -15,6 +15,7 @@ package io.prestosql.tests;
 
 import com.google.inject.Inject;
 import com.google.inject.name.Named;
+import io.prestosql.tempto.AfterTestWithContext;
 import io.prestosql.tempto.BeforeTestWithContext;
 import io.prestosql.tempto.ProductTest;
 import io.prestosql.tempto.hadoop.hdfs.HdfsClient;
@@ -51,24 +52,39 @@ public class TestImpersonation
     @Named("databases.presto.configured_hdfs_user")
     private String configuredHdfsUser;
 
+    private final String icebergSchema = "iceberg.iceberg";
+
     @BeforeTestWithContext
     public void setup()
     {
         aliceExecutor = connectToPresto("alice@presto");
+        aliceExecutor.executeQuery("CREATE SCHEMA IF NOT EXISTS " + icebergSchema);
+    }
+
+    @AfterTestWithContext
+    public void cleanup()
+    {
+        aliceExecutor.executeQuery("DROP SCHEMA IF EXISTS " + icebergSchema);
     }
 
     @Test(groups = {HDFS_NO_IMPERSONATION, PROFILE_SPECIFIC_TESTS})
     public void testHdfsImpersonationDisabled()
     {
         String tableName = "check_hdfs_impersonation_disabled";
+        // Test Hive Connector
         checkTableOwner(tableName, configuredHdfsUser, aliceExecutor);
+        // Test Iceberg Connector
+        checkTableOwner(icebergSchema + "." + tableName, configuredHdfsUser, aliceExecutor);
     }
 
     @Test(groups = {HDFS_IMPERSONATION, PROFILE_SPECIFIC_TESTS})
     public void testHdfsImpersonationEnabled()
     {
         String tableName = "check_hdfs_impersonation_enabled";
+        // Test Hive Connector
         checkTableOwner(tableName, aliceJdbcUser, aliceExecutor);
+        // Test Iceberg Connector
+        checkTableOwner(icebergSchema + "." + tableName, configuredHdfsUser, aliceExecutor);
     }
 
     private static String getTableLocation(QueryExecutor executor, String tableName)
