@@ -19,12 +19,14 @@ import com.google.common.collect.ImmutableMap;
 import com.google.common.util.concurrent.ListenableFuture;
 import io.prestosql.Session;
 import io.prestosql.connector.CatalogName;
+import io.prestosql.execution.warnings.WarningCollector;
 import io.prestosql.metadata.Metadata;
 import io.prestosql.metadata.QualifiedObjectName;
 import io.prestosql.metadata.TableHandle;
 import io.prestosql.metadata.TableMetadata;
 import io.prestosql.security.AccessControl;
 import io.prestosql.spi.PrestoException;
+import io.prestosql.spi.PrestoWarning;
 import io.prestosql.spi.connector.ColumnMetadata;
 import io.prestosql.spi.connector.ConnectorTableMetadata;
 import io.prestosql.spi.security.AccessDeniedException;
@@ -62,6 +64,7 @@ import static io.prestosql.spi.StandardErrorCode.TABLE_ALREADY_EXISTS;
 import static io.prestosql.spi.StandardErrorCode.TABLE_NOT_FOUND;
 import static io.prestosql.spi.StandardErrorCode.TYPE_NOT_FOUND;
 import static io.prestosql.spi.connector.ConnectorCapabilities.NOT_NULL_COLUMN_CONSTRAINT;
+import static io.prestosql.spi.connector.StandardWarningCode.REDIRECTED_TABLE;
 import static io.prestosql.sql.NodeUtils.mapFromProperties;
 import static io.prestosql.sql.ParameterUtils.parameterExtractor;
 import static io.prestosql.sql.analyzer.SemanticExceptions.semanticException;
@@ -86,18 +89,36 @@ public class CreateTableTask
     }
 
     @Override
-    public ListenableFuture<?> execute(CreateTable statement, TransactionManager transactionManager, Metadata metadata, AccessControl accessControl, QueryStateMachine stateMachine, List<Expression> parameters)
+    public ListenableFuture<?> execute(
+            CreateTable statement,
+            TransactionManager transactionManager,
+            Metadata metadata,
+            AccessControl accessControl,
+            QueryStateMachine stateMachine,
+            List<Expression> parameters,
+            WarningCollector warningCollector)
     {
-        return internalExecute(statement, metadata, accessControl, stateMachine.getSession(), parameters);
+        return internalExecute(statement, metadata, accessControl, stateMachine.getSession(), parameters, warningCollector);
     }
 
     @VisibleForTesting
-    ListenableFuture<?> internalExecute(CreateTable statement, Metadata metadata, AccessControl accessControl, Session session, List<Expression> parameters)
+    ListenableFuture<?> internalExecute(
+            CreateTable statement,
+            Metadata metadata,
+            AccessControl accessControl,
+            Session session,
+            List<Expression> parameters,
+            WarningCollector warningCollector)
     {
         checkArgument(!statement.getElements().isEmpty(), "no columns for table");
 
         Map<NodeRef<Parameter>, Expression> parameterLookup = parameterExtractor(statement, parameters);
         QualifiedObjectName tableName = createQualifiedObjectName(session, statement, statement.getName());
+        Optional<QualifiedObjectName> redirectedTableName = metadata.redirectTable(session, tableName);
+        if (redirectedTableName.isPresent()) {
+            tableName = redirectedTableName.get();
+            warningCollector.add(new PrestoWarning(REDIRECTED_TABLE, "Table redirection happened"));
+        }
         Optional<TableHandle> tableHandle = metadata.getTableHandle(session, tableName);
         if (tableHandle.isPresent()) {
             if (!statement.isNotExists()) {
@@ -106,8 +127,11 @@ public class CreateTableTask
             return immediateFuture(null);
         }
 
-        CatalogName catalogName = metadata.getCatalogHandle(session, tableName.getCatalogName())
-                .orElseThrow(() -> new PrestoException(NOT_FOUND, "Catalog does not exist: " + tableName.getCatalogName()));
+        Optional<CatalogName> catalog = metadata.getCatalogHandle(session, tableName.getCatalogName());
+        if (catalog.isEmpty()) {
+            throw new PrestoException(NOT_FOUND, "Catalog not found: " + tableName.getCatalogName());
+        }
+        CatalogName catalogName = catalog.get();
 
         LinkedHashMap<String, ColumnMetadata> columns = new LinkedHashMap<>();
         Map<String, Object> inheritedProperties = ImmutableMap.of();
@@ -154,14 +178,22 @@ public class CreateTableTask
             else if (element instanceof LikeClause) {
                 LikeClause likeClause = (LikeClause) element;
                 QualifiedObjectName likeTableName = createQualifiedObjectName(session, statement, likeClause.getTableName());
+                Optional<QualifiedObjectName> redirectedLikeTableName = metadata.redirectTable(session, likeTableName);
+                if (redirectedLikeTableName.isPresent()) {
+                    likeTableName = redirectedLikeTableName.get();
+                    warningCollector.add(new PrestoWarning(REDIRECTED_TABLE, "Table redirection happened"));
+                }
                 if (metadata.getCatalogHandle(session, likeTableName.getCatalogName()).isEmpty()) {
                     throw semanticException(CATALOG_NOT_FOUND, statement, "LIKE table catalog '%s' does not exist", likeTableName.getCatalogName());
                 }
                 if (!tableName.getCatalogName().equals(likeTableName.getCatalogName())) {
                     throw semanticException(NOT_SUPPORTED, statement, "LIKE table across catalogs is not supported");
                 }
-                TableHandle likeTable = metadata.getTableHandle(session, likeTableName)
-                        .orElseThrow(() -> semanticException(TABLE_NOT_FOUND, statement, "LIKE table '%s' does not exist", likeTableName));
+                Optional<TableHandle> likeTableHandle = metadata.getTableHandle(session, likeTableName);
+                if (likeTableHandle.isEmpty()) {
+                    throw semanticException(TABLE_NOT_FOUND, statement, "LIKE table '%s' does not exist", likeTableName);
+                }
+                TableHandle likeTable = likeTableHandle.get();
 
                 TableMetadata likeTableMetadata = metadata.getTableMetadata(session, likeTable);
 

@@ -15,10 +15,12 @@ package io.prestosql.execution;
 
 import com.google.common.util.concurrent.ListenableFuture;
 import io.prestosql.Session;
+import io.prestosql.execution.warnings.WarningCollector;
 import io.prestosql.metadata.Metadata;
 import io.prestosql.metadata.QualifiedObjectName;
 import io.prestosql.metadata.TableHandle;
 import io.prestosql.security.AccessControl;
+import io.prestosql.spi.PrestoWarning;
 import io.prestosql.spi.connector.ColumnHandle;
 import io.prestosql.sql.tree.Comment;
 import io.prestosql.sql.tree.Expression;
@@ -35,6 +37,7 @@ import static io.prestosql.spi.StandardErrorCode.COLUMN_NOT_FOUND;
 import static io.prestosql.spi.StandardErrorCode.MISSING_TABLE;
 import static io.prestosql.spi.StandardErrorCode.NOT_SUPPORTED;
 import static io.prestosql.spi.StandardErrorCode.TABLE_NOT_FOUND;
+import static io.prestosql.spi.connector.StandardWarningCode.REDIRECTED_TABLE;
 import static io.prestosql.sql.analyzer.SemanticExceptions.semanticException;
 
 public class CommentTask
@@ -47,12 +50,24 @@ public class CommentTask
     }
 
     @Override
-    public ListenableFuture<?> execute(Comment statement, TransactionManager transactionManager, Metadata metadata, AccessControl accessControl, QueryStateMachine stateMachine, List<Expression> parameters)
+    public ListenableFuture<?> execute(
+            Comment statement,
+            TransactionManager transactionManager,
+            Metadata metadata,
+            AccessControl accessControl,
+            QueryStateMachine stateMachine,
+            List<Expression> parameters,
+            WarningCollector warningCollector)
     {
         Session session = stateMachine.getSession();
 
         if (statement.getType() == Comment.Type.TABLE) {
             QualifiedObjectName tableName = createQualifiedObjectName(session, statement, statement.getName());
+            Optional<QualifiedObjectName> redirectedTableName = metadata.redirectTable(session, tableName);
+            if (redirectedTableName.isPresent()) {
+                tableName = redirectedTableName.get();
+                warningCollector.add(new PrestoWarning(REDIRECTED_TABLE, "Table redirection happened"));
+            }
             Optional<TableHandle> tableHandle = metadata.getTableHandle(session, tableName);
             if (tableHandle.isEmpty()) {
                 throw semanticException(TABLE_NOT_FOUND, statement, "Table does not exist: %s", tableName);
@@ -69,6 +84,11 @@ public class CommentTask
             }
 
             QualifiedObjectName tableName = createQualifiedObjectName(session, statement, prefix.get());
+            Optional<QualifiedObjectName> redirectedTableName = metadata.redirectTable(session, tableName);
+            if (redirectedTableName.isPresent()) {
+                tableName = redirectedTableName.get();
+                warningCollector.add(new PrestoWarning(REDIRECTED_TABLE, "Table redirection happened"));
+            }
             Optional<TableHandle> tableHandle = metadata.getTableHandle(session, tableName);
             if (tableHandle.isEmpty()) {
                 throw semanticException(TABLE_NOT_FOUND, statement, "Table does not exist: " + tableName);

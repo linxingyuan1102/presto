@@ -67,6 +67,7 @@ import io.prestosql.sql.tree.QualifiedName;
 import java.util.Collection;
 import java.util.List;
 import java.util.Map;
+import java.util.Map.Entry;
 import java.util.Optional;
 import java.util.OptionalLong;
 import java.util.Set;
@@ -789,6 +790,18 @@ public abstract class AbstractMockMetadata
 
     @Override
     public MaterializedViewFreshness getMaterializedViewFreshness(Session session, TableHandle tableHandle)
+    {
+        throw new UnsupportedOperationException();
+    }
+
+    @Override
+    public Optional<QualifiedObjectName> redirectTable(Session session, QualifiedObjectName tableName)
+    {
+        throw new UnsupportedOperationException();
+    }
+
+    @Override
+    public Optional<Entry<QualifiedObjectName, QualifiedObjectName>> redirectTableRename(Session session, QualifiedObjectName sourceTableName, QualifiedObjectName targetTableName)
     {
         throw new UnsupportedOperationException();
     }

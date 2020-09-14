@@ -16,11 +16,13 @@ package io.prestosql.execution;
 import com.google.common.util.concurrent.ListenableFuture;
 import io.prestosql.Session;
 import io.prestosql.connector.CatalogName;
+import io.prestosql.execution.warnings.WarningCollector;
 import io.prestosql.metadata.Metadata;
 import io.prestosql.metadata.QualifiedObjectName;
 import io.prestosql.metadata.TableHandle;
 import io.prestosql.security.AccessControl;
 import io.prestosql.spi.PrestoException;
+import io.prestosql.spi.PrestoWarning;
 import io.prestosql.spi.connector.ColumnHandle;
 import io.prestosql.spi.connector.ColumnMetadata;
 import io.prestosql.spi.type.Type;
@@ -43,6 +45,7 @@ import static io.prestosql.spi.StandardErrorCode.NOT_SUPPORTED;
 import static io.prestosql.spi.StandardErrorCode.TABLE_NOT_FOUND;
 import static io.prestosql.spi.StandardErrorCode.TYPE_NOT_FOUND;
 import static io.prestosql.spi.connector.ConnectorCapabilities.NOT_NULL_COLUMN_CONSTRAINT;
+import static io.prestosql.spi.connector.StandardWarningCode.REDIRECTED_TABLE;
 import static io.prestosql.sql.NodeUtils.mapFromProperties;
 import static io.prestosql.sql.ParameterUtils.parameterExtractor;
 import static io.prestosql.sql.analyzer.SemanticExceptions.semanticException;
@@ -60,10 +63,22 @@ public class AddColumnTask
     }
 
     @Override
-    public ListenableFuture<?> execute(AddColumn statement, TransactionManager transactionManager, Metadata metadata, AccessControl accessControl, QueryStateMachine stateMachine, List<Expression> parameters)
+    public ListenableFuture<?> execute(
+            AddColumn statement,
+            TransactionManager transactionManager,
+            Metadata metadata,
+            AccessControl accessControl,
+            QueryStateMachine stateMachine,
+            List<Expression> parameters,
+            WarningCollector warningCollector)
     {
         Session session = stateMachine.getSession();
         QualifiedObjectName tableName = createQualifiedObjectName(session, statement, statement.getName());
+        Optional<QualifiedObjectName> redirectedTableName = metadata.redirectTable(session, tableName);
+        if (redirectedTableName.isPresent()) {
+            tableName = redirectedTableName.get();
+            warningCollector.add(new PrestoWarning(REDIRECTED_TABLE, "Table redirection happened"));
+        }
         Optional<TableHandle> tableHandle = metadata.getTableHandle(session, tableName);
         if (tableHandle.isEmpty()) {
             if (!statement.isTableExists()) {
@@ -72,8 +87,11 @@ public class AddColumnTask
             return immediateFuture(null);
         }
 
-        CatalogName catalogName = metadata.getCatalogHandle(session, tableName.getCatalogName())
-                .orElseThrow(() -> new PrestoException(NOT_FOUND, "Catalog does not exist: " + tableName.getCatalogName()));
+        Optional<CatalogName> catalog = metadata.getCatalogHandle(session, tableName.getCatalogName());
+        if (catalog.isEmpty()) {
+            throw new PrestoException(NOT_FOUND, "Catalog not found: " + tableName.getCatalogName());
+        }
+        CatalogName catalogName = catalog.get();
 
         accessControl.checkCanAddColumns(session.toSecurityContext(), tableName);
 

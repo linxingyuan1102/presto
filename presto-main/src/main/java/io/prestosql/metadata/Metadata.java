@@ -63,6 +63,7 @@ import io.prestosql.sql.tree.QualifiedName;
 import java.util.Collection;
 import java.util.List;
 import java.util.Map;
+import java.util.Map.Entry;
 import java.util.Optional;
 import java.util.OptionalLong;
 import java.util.Set;
@@ -571,4 +572,16 @@ public interface Metadata
      * The method is used by the engine to determine if a materialized view is current with respect to the tables it depends on.
      */
     MaterializedViewFreshness getMaterializedViewFreshness(Session session, TableHandle tableHandle);
+
+    /**
+     * Redirect to another table if necessary. Return the original table name if redirection doesn't happen.
+     * This method is called before resolving a table name to a table handle.
+     */
+    Optional<QualifiedObjectName> redirectTable(Session session, QualifiedObjectName tableName);
+
+    /**
+     * Redirect the target table name of a rename operation to another one if necessary. Return original target table name if redirection doesn't happen.
+     * This method is called before renaming a table.
+     */
+    Optional<Entry<QualifiedObjectName, QualifiedObjectName>> redirectTableRename(Session session, QualifiedObjectName sourceTableName, QualifiedObjectName targetTableName);
 }

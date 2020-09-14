@@ -19,6 +19,7 @@ import io.prestosql.execution.warnings.WarningCollector;
 import io.prestosql.metadata.Metadata;
 import io.prestosql.metadata.QualifiedObjectName;
 import io.prestosql.security.AccessControl;
+import io.prestosql.spi.PrestoWarning;
 import io.prestosql.spi.connector.ConnectorViewDefinition;
 import io.prestosql.sql.analyzer.Analysis;
 import io.prestosql.sql.analyzer.Analyzer;
@@ -38,6 +39,7 @@ import static com.google.common.collect.ImmutableList.toImmutableList;
 import static com.google.common.util.concurrent.Futures.immediateFuture;
 import static io.prestosql.metadata.MetadataUtil.createQualifiedObjectName;
 import static io.prestosql.spi.connector.ConnectorViewDefinition.ViewColumn;
+import static io.prestosql.spi.connector.StandardWarningCode.REDIRECTED_TABLE;
 import static io.prestosql.sql.ParameterUtils.parameterExtractor;
 import static io.prestosql.sql.SqlFormatterUtil.getFormattedSql;
 import static io.prestosql.sql.tree.CreateView.Security.INVOKER;
@@ -68,10 +70,22 @@ public class CreateViewTask
     }
 
     @Override
-    public ListenableFuture<?> execute(CreateView statement, TransactionManager transactionManager, Metadata metadata, AccessControl accessControl, QueryStateMachine stateMachine, List<Expression> parameters)
+    public ListenableFuture<?> execute(
+            CreateView statement,
+            TransactionManager transactionManager,
+            Metadata metadata,
+            AccessControl accessControl,
+            QueryStateMachine stateMachine,
+            List<Expression> parameters,
+            WarningCollector warningCollector)
     {
         Session session = stateMachine.getSession();
         QualifiedObjectName name = createQualifiedObjectName(session, statement, statement.getName());
+        Optional<QualifiedObjectName> redirectedName = metadata.redirectTable(session, name);
+        if (redirectedName.isPresent()) {
+            name = redirectedName.get();
+            warningCollector.add(new PrestoWarning(REDIRECTED_TABLE, "Table redirection happened"));
+        }
 
         accessControl.checkCanCreateView(session.toSecurityContext(), name);
 

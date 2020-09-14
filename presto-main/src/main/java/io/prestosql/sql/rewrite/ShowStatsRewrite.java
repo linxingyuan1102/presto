@@ -23,6 +23,7 @@ import io.prestosql.metadata.TableHandle;
 import io.prestosql.metadata.TableMetadata;
 import io.prestosql.security.AccessControl;
 import io.prestosql.spi.PrestoException;
+import io.prestosql.spi.PrestoWarning;
 import io.prestosql.spi.connector.ColumnHandle;
 import io.prestosql.spi.connector.ColumnMetadata;
 import io.prestosql.spi.connector.Constraint;
@@ -77,6 +78,7 @@ import static com.google.common.collect.ImmutableList.toImmutableList;
 import static io.prestosql.metadata.MetadataUtil.createQualifiedObjectName;
 import static io.prestosql.spi.StandardErrorCode.NOT_SUPPORTED;
 import static io.prestosql.spi.StandardErrorCode.TABLE_NOT_FOUND;
+import static io.prestosql.spi.connector.StandardWarningCode.REDIRECTED_TABLE;
 import static io.prestosql.spi.type.DateType.DATE;
 import static io.prestosql.spi.type.DoubleType.DOUBLE;
 import static io.prestosql.spi.type.VarcharType.VARCHAR;
@@ -142,6 +144,11 @@ public class ShowStatsRewrite
 
             Table table = getTable(node, specification);
             QualifiedObjectName tableName = createQualifiedObjectName(session, node, table.getName());
+            Optional<QualifiedObjectName> redirectedTableName = metadata.redirectTable(session, tableName);
+            if (redirectedTableName.isPresent()) {
+                tableName = redirectedTableName.get();
+                warningCollector.add(new PrestoWarning(REDIRECTED_TABLE, "Table redirection happened"));
+            }
             TableHandle tableHandle = metadata.getTableHandle(session, tableName)
                     .orElseThrow(() -> semanticException(TABLE_NOT_FOUND, node, "Table '%s' not found", table.getName()));
             TableMetadata tableMetadata = metadata.getTableMetadata(session, tableHandle);

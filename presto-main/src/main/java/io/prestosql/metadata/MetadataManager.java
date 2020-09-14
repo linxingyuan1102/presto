@@ -113,6 +113,7 @@ import javax.inject.Inject;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -138,8 +139,10 @@ import static io.prestosql.metadata.FunctionKind.AGGREGATE;
 import static io.prestosql.metadata.QualifiedObjectName.convertFromSchemaTableName;
 import static io.prestosql.metadata.Signature.mangleOperatorName;
 import static io.prestosql.metadata.SignatureBinder.applyBoundVariables;
+import static io.prestosql.spi.StandardErrorCode.CATALOG_NOT_FOUND;
 import static io.prestosql.spi.StandardErrorCode.FUNCTION_IMPLEMENTATION_MISSING;
 import static io.prestosql.spi.StandardErrorCode.FUNCTION_NOT_FOUND;
+import static io.prestosql.spi.StandardErrorCode.GENERIC_INTERNAL_ERROR;
 import static io.prestosql.spi.StandardErrorCode.INVALID_VIEW;
 import static io.prestosql.spi.StandardErrorCode.NOT_SUPPORTED;
 import static io.prestosql.spi.StandardErrorCode.SCHEMA_NOT_FOUND;
@@ -188,6 +191,8 @@ public final class MetadataManager
     private final ConcurrentMap<QueryId, QueryCatalogs> catalogsByQueryId = new ConcurrentHashMap<>();
 
     private final ResolvedFunctionDecoder functionDecoder;
+
+    private static final int TABLE_REDIRECTION_MAX_TIMES = 100;
 
     @Inject
     public MetadataManager(
@@ -1873,6 +1878,88 @@ public final class MetadataManager
     public AnalyzePropertyManager getAnalyzePropertyManager()
     {
         return analyzePropertyManager;
+    }
+
+    @Override
+    public Optional<QualifiedObjectName> redirectTable(Session session, QualifiedObjectName tableName)
+    {
+        requireNonNull(session, "session is null");
+        QualifiedObjectName originalTableName = requireNonNull(tableName, "tableName is null");
+
+        Set<QualifiedObjectName> visitedTableNames = new HashSet<>();
+        visitedTableNames.add(tableName);
+        int count = TABLE_REDIRECTION_MAX_TIMES;
+        while (count-- > 0) {
+            Optional<CatalogMetadata> catalog = getOptionalCatalogMetadata(session, tableName.getCatalogName());
+            if (catalog.isEmpty()) {
+                throw new PrestoException(CATALOG_NOT_FOUND, format("Catalog '%s' does not exist", tableName.getCatalogName()));
+            }
+            CatalogMetadata catalogMetadata = catalog.get();
+            CatalogName catalogName = catalogMetadata.getConnectorId(session, tableName);
+            ConnectorMetadata metadata = catalogMetadata.getMetadataFor(catalogName);
+            ConnectorSession connectorSession = session.toConnectorSession(catalogName);
+
+            Optional<QualifiedObjectName> redirectedTableName = metadata.redirectTable(connectorSession, tableName.asSchemaTableName())
+                    .map(name -> convertFromSchemaTableName(name.getCatalogName()).apply(name.getSchemaTableName()));
+
+            if (redirectedTableName.isEmpty()) {
+                if (tableName.equals(originalTableName)) {
+                    return Optional.empty();
+                }
+                return Optional.of(tableName);
+            }
+
+            tableName = redirectedTableName.get();
+            if (!visitedTableNames.add(tableName)) {
+                throw new PrestoException(GENERIC_INTERNAL_ERROR, "Table redirection forms a loop");
+            }
+        }
+        throw new PrestoException(GENERIC_INTERNAL_ERROR, format("Table redirection happened more than %d times", TABLE_REDIRECTION_MAX_TIMES));
+    }
+
+    @Override
+    public Optional<Entry<QualifiedObjectName, QualifiedObjectName>> redirectTableRename(Session session, QualifiedObjectName sourceTableName, QualifiedObjectName targetTableName)
+    {
+        requireNonNull(session, "session is null");
+        QualifiedObjectName originalSourceTableName = requireNonNull(sourceTableName, "sourceTableName is null");
+        QualifiedObjectName originalTargetTableName = requireNonNull(targetTableName, "targetTableName is null");
+
+        Set<Entry<QualifiedObjectName, QualifiedObjectName>> visitedSourceTargets = new HashSet<>();
+        visitedSourceTargets.add(Map.entry(sourceTableName, targetTableName));
+        int count = TABLE_REDIRECTION_MAX_TIMES;
+        while (count-- > 0) {
+            if (!sourceTableName.getCatalogName().equals(targetTableName.getCatalogName())) {
+                throw new PrestoException(NOT_SUPPORTED, "Table rename across catalogs is not supported");
+            }
+            Optional<CatalogMetadata> catalog = getOptionalCatalogMetadata(session, sourceTableName.getCatalogName());
+            if (catalog.isEmpty()) {
+                throw new PrestoException(CATALOG_NOT_FOUND, format("Catalog '%s' does not exist", sourceTableName.getCatalogName()));
+            }
+            CatalogMetadata catalogMetadata = catalog.get();
+            CatalogName catalogName = catalogMetadata.getConnectorId(session, sourceTableName);
+            ConnectorMetadata metadata = catalogMetadata.getMetadataFor(catalogName);
+            ConnectorSession connectorSession = session.toConnectorSession(catalogName);
+
+            Optional<QualifiedObjectName> redirectedSourceTableName = metadata.redirectTable(connectorSession, sourceTableName.asSchemaTableName())
+                    .map(name -> convertFromSchemaTableName(name.getCatalogName()).apply(name.getSchemaTableName()));
+            Optional<QualifiedObjectName> redirectedTargetTableName = metadata.redirectTableRename(connectorSession, sourceTableName.asSchemaTableName(), targetTableName.asSchemaTableName())
+                    .map(name -> convertFromSchemaTableName(name.getCatalogName()).apply(name.getSchemaTableName()));
+
+            if (redirectedSourceTableName.isEmpty() && redirectedTargetTableName.isEmpty()) {
+                if (sourceTableName.equals(originalSourceTableName) && targetTableName.equals(originalTargetTableName)) {
+                    return Optional.empty();
+                }
+                return Optional.of(Map.entry(sourceTableName, targetTableName));
+            }
+
+            sourceTableName = redirectedSourceTableName.orElse(sourceTableName);
+            targetTableName = redirectedTargetTableName.orElse(targetTableName);
+
+            if (!visitedSourceTargets.add(Map.entry(sourceTableName, targetTableName))) {
+                throw new PrestoException(GENERIC_INTERNAL_ERROR, "Table rename redirection forms a loop");
+            }
+        }
+        throw new PrestoException(GENERIC_INTERNAL_ERROR, format("Table rename redirection happened more than %d times", TABLE_REDIRECTION_MAX_TIMES));
     }
 
     //

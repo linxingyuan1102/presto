@@ -21,6 +21,7 @@ import io.prestosql.metadata.Metadata;
 import io.prestosql.metadata.QualifiedObjectName;
 import io.prestosql.security.AccessControl;
 import io.prestosql.spi.PrestoException;
+import io.prestosql.spi.PrestoWarning;
 import io.prestosql.spi.connector.ConnectorMaterializedViewDefinition;
 import io.prestosql.sql.analyzer.Analysis;
 import io.prestosql.sql.analyzer.Analyzer;
@@ -43,6 +44,7 @@ import static com.google.common.collect.ImmutableList.toImmutableList;
 import static com.google.common.util.concurrent.Futures.immediateFuture;
 import static io.prestosql.metadata.MetadataUtil.createQualifiedObjectName;
 import static io.prestosql.spi.StandardErrorCode.NOT_FOUND;
+import static io.prestosql.spi.connector.StandardWarningCode.REDIRECTED_TABLE;
 import static io.prestosql.sql.NodeUtils.mapFromProperties;
 import static io.prestosql.sql.ParameterUtils.parameterExtractor;
 import static io.prestosql.sql.SqlFormatterUtil.getFormattedSql;
@@ -79,10 +81,16 @@ public class CreateMaterializedViewTask
             Metadata metadata,
             AccessControl accessControl,
             QueryStateMachine stateMachine,
-            List<Expression> parameters)
+            List<Expression> parameters,
+            WarningCollector warningCollector)
     {
         Session session = stateMachine.getSession();
         QualifiedObjectName name = createQualifiedObjectName(session, statement, statement.getName());
+        Optional<QualifiedObjectName> redirectedName = metadata.redirectTable(session, name);
+        if (redirectedName.isPresent()) {
+            name = redirectedName.get();
+            warningCollector.add(new PrestoWarning(REDIRECTED_TABLE, "Table redirection happened"));
+        }
         Map<NodeRef<Parameter>, Expression> parameterLookup = parameterExtractor(statement, parameters);
 
         String sql = getFormattedSql(statement.getQuery(), sqlParser);
@@ -96,8 +104,11 @@ public class CreateMaterializedViewTask
 
         Optional<String> owner = Optional.of(session.getUser());
 
-        CatalogName catalogName = metadata.getCatalogHandle(session, name.getCatalogName())
-                .orElseThrow(() -> new PrestoException(NOT_FOUND, "Catalog does not exist: " + name.getCatalogName()));
+        Optional<CatalogName> catalog = metadata.getCatalogHandle(session, name.getCatalogName());
+        if (catalog.isEmpty()) {
+            throw new PrestoException(NOT_FOUND, "Catalog not found: " + name.getCatalogName());
+        }
+        CatalogName catalogName = catalog.get();
 
         Map<String, Expression> sqlProperties = mapFromProperties(statement.getProperties());
         Map<String, Object> properties = metadata.getTablePropertyManager().getProperties(

@@ -113,6 +113,7 @@ public class TestSetPathTask
                 metadata,
                 accessControl,
                 stateMachine,
-                emptyList()));
+                emptyList(),
+                WarningCollector.NOOP));
     }
 }

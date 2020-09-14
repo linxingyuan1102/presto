@@ -31,6 +31,7 @@ import io.prestosql.metadata.SessionPropertyManager.SessionPropertyValue;
 import io.prestosql.metadata.TableHandle;
 import io.prestosql.security.AccessControl;
 import io.prestosql.spi.PrestoException;
+import io.prestosql.spi.PrestoWarning;
 import io.prestosql.spi.StandardErrorCode;
 import io.prestosql.spi.connector.CatalogSchemaName;
 import io.prestosql.spi.connector.ConnectorMaterializedViewDefinition;
@@ -111,6 +112,7 @@ import static io.prestosql.spi.StandardErrorCode.MISSING_CATALOG_NAME;
 import static io.prestosql.spi.StandardErrorCode.NOT_SUPPORTED;
 import static io.prestosql.spi.StandardErrorCode.SCHEMA_NOT_FOUND;
 import static io.prestosql.spi.StandardErrorCode.TABLE_NOT_FOUND;
+import static io.prestosql.spi.connector.StandardWarningCode.REDIRECTED_TABLE;
 import static io.prestosql.sql.ExpressionUtils.combineConjuncts;
 import static io.prestosql.sql.ParsingUtil.createParsingOptions;
 import static io.prestosql.sql.QueryUtil.aliased;
@@ -158,7 +160,7 @@ final class ShowQueriesRewrite
             AccessControl accessControl,
             WarningCollector warningCollector)
     {
-        return (Statement) new Visitor(metadata, parser, session, accessControl).process(node, null);
+        return (Statement) new Visitor(metadata, parser, session, accessControl, warningCollector).process(node, null);
     }
 
     private static class Visitor
@@ -168,13 +170,15 @@ final class ShowQueriesRewrite
         private final Session session;
         private final SqlParser sqlParser;
         private final AccessControl accessControl;
+        private final WarningCollector warningCollector;
 
-        public Visitor(Metadata metadata, SqlParser sqlParser, Session session, AccessControl accessControl)
+        public Visitor(Metadata metadata, SqlParser sqlParser, Session session, AccessControl accessControl, WarningCollector warningCollector)
         {
             this.metadata = requireNonNull(metadata, "metadata is null");
             this.sqlParser = requireNonNull(sqlParser, "sqlParser is null");
             this.session = requireNonNull(session, "session is null");
             this.accessControl = requireNonNull(accessControl, "accessControl is null");
+            this.warningCollector = requireNonNull(warningCollector, "warningCollector is null");
         }
 
         @Override
@@ -231,7 +235,11 @@ final class ShowQueriesRewrite
             Optional<QualifiedName> tableName = showGrants.getTableName();
             if (tableName.isPresent()) {
                 QualifiedObjectName qualifiedTableName = createQualifiedObjectName(session, showGrants, tableName.get());
-
+                Optional<QualifiedObjectName> redirectedTableName = metadata.redirectTable(session, qualifiedTableName);
+                if (redirectedTableName.isPresent()) {
+                    qualifiedTableName = redirectedTableName.get();
+                    warningCollector.add(new PrestoWarning(REDIRECTED_TABLE, "Table redirection happened"));
+                }
                 if (metadata.getView(session, qualifiedTableName).isEmpty() &&
                         metadata.getTableHandle(session, qualifiedTableName).isEmpty()) {
                     throw semanticException(TABLE_NOT_FOUND, showGrants, "Table '%s' does not exist", tableName);
@@ -377,6 +385,11 @@ final class ShowQueriesRewrite
         protected Node visitShowColumns(ShowColumns showColumns, Void context)
         {
             QualifiedObjectName tableName = createQualifiedObjectName(session, showColumns, showColumns.getTable());
+            Optional<QualifiedObjectName> redirectedTableName = metadata.redirectTable(session, tableName);
+            if (redirectedTableName.isPresent()) {
+                tableName = redirectedTableName.get();
+                warningCollector.add(new PrestoWarning(REDIRECTED_TABLE, "Table redirection happened"));
+            }
             if (metadata.getCatalogHandle(session, tableName.getCatalogName()).isEmpty()) {
                 throw semanticException(CATALOG_NOT_FOUND, showColumns, "Catalog '%s' does not exist", tableName.getCatalogName());
             }
@@ -453,6 +466,11 @@ final class ShowQueriesRewrite
         {
             if (node.getType() == VIEW) {
                 QualifiedObjectName objectName = createQualifiedObjectName(session, node, node.getName());
+                Optional<QualifiedObjectName> redirectedName = metadata.redirectTable(session, objectName);
+                if (redirectedName.isPresent()) {
+                    objectName = redirectedName.get();
+                    warningCollector.add(new PrestoWarning(REDIRECTED_TABLE, "Table redirection happened"));
+                }
 
                 if (metadata.getMaterializedView(session, objectName).isPresent()) {
                     throw semanticException(NOT_SUPPORTED, node, "Relation '%s' is a materialized view, not a view", objectName);
@@ -481,6 +499,11 @@ final class ShowQueriesRewrite
 
             if (node.getType() == MATERIALIZED_VIEW) {
                 QualifiedObjectName objectName = createQualifiedObjectName(session, node, node.getName());
+                Optional<QualifiedObjectName> redirectedName = metadata.redirectTable(session, objectName);
+                if (redirectedName.isPresent()) {
+                    objectName = redirectedName.get();
+                    warningCollector.add(new PrestoWarning(REDIRECTED_TABLE, "Table redirection happened"));
+                }
                 Optional<ConnectorMaterializedViewDefinition> viewDefinition = metadata.getMaterializedView(session, objectName);
 
                 if (viewDefinition.isEmpty()) {
@@ -505,6 +528,11 @@ final class ShowQueriesRewrite
 
             if (node.getType() == TABLE) {
                 QualifiedObjectName objectName = createQualifiedObjectName(session, node, node.getName());
+                Optional<QualifiedObjectName> redirectedName = metadata.redirectTable(session, objectName);
+                if (redirectedName.isPresent()) {
+                    objectName = redirectedName.get();
+                    warningCollector.add(new PrestoWarning(REDIRECTED_TABLE, "Table redirection happened"));
+                }
                 Optional<ConnectorViewDefinition> viewDefinition = metadata.getView(session, objectName);
 
                 if (viewDefinition.isPresent()) {
@@ -521,10 +549,11 @@ final class ShowQueriesRewrite
 
                 Map<String, PropertyMetadata<?>> allColumnProperties = metadata.getColumnPropertyManager().getAllProperties().get(tableHandle.get().getCatalogName());
 
+                QualifiedObjectName finalObjectName = objectName;
                 List<TableElement> columns = connectorTableMetadata.getColumns().stream()
                         .filter(column -> !column.isHidden())
                         .map(column -> {
-                            List<Property> propertyNodes = buildProperties(objectName, Optional.of(column.getName()), INVALID_COLUMN_PROPERTY, column.getProperties(), allColumnProperties);
+                            List<Property> propertyNodes = buildProperties(finalObjectName, Optional.of(column.getName()), INVALID_COLUMN_PROPERTY, column.getProperties(), allColumnProperties);
                             return new ColumnDefinition(new Identifier(column.getName()), toSqlType(column.getType()), column.isNullable(), propertyNodes, Optional.ofNullable(column.getComment()));
                         })
                         .collect(toImmutableList());

@@ -84,7 +84,7 @@ public class TestCallTask
 
         Call procedure = getProcedureInvocation();
 
-        new CallTask().execute(procedure, transactionManager, metadata, accessControl, stateMachine, ImmutableList.of());
+        new CallTask().execute(procedure, transactionManager, metadata, accessControl, stateMachine, ImmutableList.of(), WarningCollector.NOOP);
 
         assertThat(invoked).isTrue();
     }
@@ -100,7 +100,7 @@ public class TestCallTask
         Call procedure = getProcedureInvocation();
 
         assertThatThrownBy(
-                () -> new CallTask().execute(procedure, transactionManager, metadata, accessControl, stateMachine, ImmutableList.of()))
+                () -> new CallTask().execute(procedure, transactionManager, metadata, accessControl, stateMachine, ImmutableList.of(), WarningCollector.NOOP))
                 .isInstanceOf(AccessDeniedException.class)
                 .hasMessage("Access Denied: Cannot execute procedure test.test.testing_procedure");
 

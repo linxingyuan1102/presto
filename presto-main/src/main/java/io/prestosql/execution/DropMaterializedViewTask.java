@@ -15,9 +15,11 @@ package io.prestosql.execution;
 
 import com.google.common.util.concurrent.ListenableFuture;
 import io.prestosql.Session;
+import io.prestosql.execution.warnings.WarningCollector;
 import io.prestosql.metadata.Metadata;
 import io.prestosql.metadata.QualifiedObjectName;
 import io.prestosql.security.AccessControl;
+import io.prestosql.spi.PrestoWarning;
 import io.prestosql.spi.connector.ConnectorMaterializedViewDefinition;
 import io.prestosql.sql.tree.DropMaterializedView;
 import io.prestosql.sql.tree.Expression;
@@ -29,6 +31,7 @@ import java.util.Optional;
 import static com.google.common.util.concurrent.Futures.immediateFuture;
 import static io.prestosql.metadata.MetadataUtil.createQualifiedObjectName;
 import static io.prestosql.spi.StandardErrorCode.TABLE_NOT_FOUND;
+import static io.prestosql.spi.connector.StandardWarningCode.REDIRECTED_TABLE;
 import static io.prestosql.sql.analyzer.SemanticExceptions.semanticException;
 
 public class DropMaterializedViewTask
@@ -47,10 +50,16 @@ public class DropMaterializedViewTask
             Metadata metadata,
             AccessControl accessControl,
             QueryStateMachine stateMachine,
-            List<Expression> parameters)
+            List<Expression> parameters,
+            WarningCollector warningCollector)
     {
         Session session = stateMachine.getSession();
         QualifiedObjectName name = createQualifiedObjectName(session, statement, statement.getName());
+        Optional<QualifiedObjectName> redirectedName = metadata.redirectTable(session, name);
+        if (redirectedName.isPresent()) {
+            name = redirectedName.get();
+            warningCollector.add(new PrestoWarning(REDIRECTED_TABLE, "Table redirection happened"));
+        }
 
         Optional<ConnectorMaterializedViewDefinition> view = metadata.getMaterializedView(session, name);
         if (!view.isPresent()) {

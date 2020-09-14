@@ -1021,4 +1021,28 @@ public interface ConnectorMetadata
     {
         return new MaterializedViewFreshness(false);
     }
+
+    /**
+     * Redirect to another table which may or may not in the same catalog.
+     * <p>
+     * This method is called before the engine resolves a table name to a table handle. Connectors should return {@link Optional#empty()}
+     * when redirection is not expected to happen.
+     * </p>
+     */
+    default Optional<CatalogSchemaTableName> redirectTable(ConnectorSession session, SchemaTableName tableName)
+    {
+        return Optional.empty();
+    }
+
+    /**
+     * Redirect the target table name of a rename operation to another one which may or may not in the same catalog.
+     * <p>
+     * This method is called before the engine tries to rename a table. Connectors should return {@link Optional#empty()}
+     * when redirection is not expected to happen.
+     * </p>
+     */
+    default Optional<CatalogSchemaTableName> redirectTableRename(ConnectorSession session, SchemaTableName sourceTableName, SchemaTableName targetTableName)
+    {
+        return Optional.empty();
+    }
 }

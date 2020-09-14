@@ -221,6 +221,7 @@ import static io.prestosql.spi.StandardErrorCode.TOO_MANY_GROUPING_SETS;
 import static io.prestosql.spi.StandardErrorCode.TYPE_MISMATCH;
 import static io.prestosql.spi.StandardErrorCode.VIEW_IS_RECURSIVE;
 import static io.prestosql.spi.StandardErrorCode.VIEW_IS_STALE;
+import static io.prestosql.spi.connector.StandardWarningCode.REDIRECTED_TABLE;
 import static io.prestosql.spi.connector.StandardWarningCode.REDUNDANT_ORDER_BY;
 import static io.prestosql.spi.type.BigintType.BIGINT;
 import static io.prestosql.spi.type.BooleanType.BOOLEAN;
@@ -366,6 +367,11 @@ class StatementAnalyzer
         protected Scope visitInsert(Insert insert, Optional<Scope> scope)
         {
             QualifiedObjectName targetTable = createQualifiedObjectName(session, insert, insert.getTarget());
+            Optional<QualifiedObjectName> redirectedTargetTable = metadata.redirectTable(session, targetTable);
+            if (redirectedTargetTable.isPresent()) {
+                targetTable = redirectedTargetTable.get();
+                warningCollector.add(new PrestoWarning(REDIRECTED_TABLE, "Table redirection happened"));
+            }
 
             if (metadata.getMaterializedView(session, targetTable).isPresent()) {
                 throw semanticException(NOT_SUPPORTED, insert, "Inserting into materialized views is not supported");
@@ -461,6 +467,11 @@ class StatementAnalyzer
         protected Scope visitRefreshMaterializedView(RefreshMaterializedView refreshMaterializedView, Optional<Scope> scope)
         {
             QualifiedObjectName name = createQualifiedObjectName(session, refreshMaterializedView, refreshMaterializedView.getName());
+            Optional<QualifiedObjectName> redirectedName = metadata.redirectTable(session, name);
+            if (redirectedName.isPresent()) {
+                name = redirectedName.get();
+                warningCollector.add(new PrestoWarning(REDIRECTED_TABLE, "Table redirection happened"));
+            }
             Optional<ConnectorMaterializedViewDefinition> optionalView = metadata.getMaterializedView(session, name);
 
             if (optionalView.isEmpty()) {
@@ -474,7 +485,11 @@ class StatementAnalyzer
             }
 
             QualifiedObjectName targetTable = createQualifiedObjectName(session, refreshMaterializedView, storageName.get());
-
+            Optional<QualifiedObjectName> redirectedTargetTable = metadata.redirectTable(session, targetTable);
+            if (redirectedTargetTable.isPresent()) {
+                targetTable = redirectedTargetTable.get();
+                warningCollector.add(new PrestoWarning(REDIRECTED_TABLE, "Table redirection happened"));
+            }
             // analyze the query that creates the data
             Query query = parseView(optionalView.get().getOriginalSql(), name, refreshMaterializedView);
             Scope queryScope = process(query, scope);
@@ -586,12 +601,20 @@ class StatementAnalyzer
         {
             Table table = node.getTable();
             QualifiedObjectName tableName = createQualifiedObjectName(session, table, table.getName());
+            Optional<QualifiedObjectName> redirectedTableName = metadata.redirectTable(session, tableName);
+            if (redirectedTableName.isPresent()) {
+                tableName = redirectedTableName.get();
+                warningCollector.add(new PrestoWarning(REDIRECTED_TABLE, "Table redirection happened"));
+            }
             if (metadata.getView(session, tableName).isPresent()) {
                 throw semanticException(NOT_SUPPORTED, node, "Deleting from views is not supported");
             }
 
-            TableHandle handle = metadata.getTableHandle(session, tableName)
-                    .orElseThrow(() -> semanticException(TABLE_NOT_FOUND, table, "Table '%s' does not exist", tableName));
+            Optional<TableHandle> tableHandle = metadata.getTableHandle(session, tableName);
+            if (tableHandle.isEmpty()) {
+                throw semanticException(TABLE_NOT_FOUND, table, "Table '%s' does not exist", tableName);
+            }
+            TableHandle handle = tableHandle.get();
 
             accessControl.checkCanDeleteFromTable(session.toSecurityContext(), tableName);
 
@@ -629,6 +652,11 @@ class StatementAnalyzer
         protected Scope visitAnalyze(Analyze node, Optional<Scope> scope)
         {
             QualifiedObjectName tableName = createQualifiedObjectName(session, node, node.getTableName());
+            Optional<QualifiedObjectName> redirectedTableName = metadata.redirectTable(session, tableName);
+            if (redirectedTableName.isPresent()) {
+                tableName = redirectedTableName.get();
+                warningCollector.add(new PrestoWarning(REDIRECTED_TABLE, "Table redirection happened"));
+            }
             analysis.setUpdateType("ANALYZE", tableName);
 
             // verify the target table exists and it's not a view
@@ -637,8 +665,11 @@ class StatementAnalyzer
             }
 
             validateProperties(node.getProperties(), scope);
-            CatalogName catalogName = metadata.getCatalogHandle(session, tableName.getCatalogName())
-                    .orElseThrow(() -> new PrestoException(NOT_FOUND, "Catalog not found: " + tableName.getCatalogName()));
+            Optional<CatalogName> catalog = metadata.getCatalogHandle(session, tableName.getCatalogName());
+            if (catalog.isEmpty()) {
+                throw new PrestoException(NOT_FOUND, "Catalog not found: " + tableName.getCatalogName());
+            }
+            CatalogName catalogName = catalog.get();
 
             Map<String, Object> analyzeProperties = metadata.getAnalyzePropertyManager().getProperties(
                     catalogName,
@@ -648,8 +679,11 @@ class StatementAnalyzer
                     metadata,
                     accessControl,
                     analysis.getParameters());
-            TableHandle tableHandle = metadata.getTableHandleForStatisticsCollection(session, tableName, analyzeProperties)
-                    .orElseThrow(() -> semanticException(TABLE_NOT_FOUND, node, "Table '%s' does not exist", tableName));
+            Optional<TableHandle> tableHandleOptional = metadata.getTableHandleForStatisticsCollection(session, tableName, analyzeProperties);
+            if (tableHandleOptional.isEmpty()) {
+                throw semanticException(TABLE_NOT_FOUND, node, "Table '%s' does not exist", tableName);
+            }
+            TableHandle tableHandle = tableHandleOptional.get();
 
             // user must have read and insert permission in order to analyze stats of a table
             analysis.addTableColumnReferences(
@@ -674,6 +708,11 @@ class StatementAnalyzer
         {
             // turn this into a query that has a new table writer node on top.
             QualifiedObjectName targetTable = createQualifiedObjectName(session, node, node.getName());
+            Optional<QualifiedObjectName> redirectedTargetTable = metadata.redirectTable(session, targetTable);
+            if (redirectedTargetTable.isPresent()) {
+                targetTable = redirectedTargetTable.get();
+                warningCollector.add(new PrestoWarning(REDIRECTED_TABLE, "Table redirection happened"));
+            }
             analysis.setUpdateType("CREATE TABLE", targetTable);
 
             Optional<TableHandle> targetTableHandle = metadata.getTableHandle(session, targetTable);
@@ -720,8 +759,11 @@ class StatementAnalyzer
             }
 
             // create target table metadata
-            CatalogName catalogName = metadata.getCatalogHandle(session, targetTable.getCatalogName())
-                    .orElseThrow(() -> new PrestoException(NOT_FOUND, "Catalog does not exist: " + targetTable.getCatalogName()));
+            Optional<CatalogName> catalog = metadata.getCatalogHandle(session, targetTable.getCatalogName());
+            if (catalog.isEmpty()) {
+                throw new PrestoException(NOT_FOUND, "Catalog does not exist: " + targetTable.getCatalogName());
+            }
+            CatalogName catalogName = catalog.get();
 
             Map<String, Object> properties = metadata.getTablePropertyManager().getProperties(
                     catalogName,
@@ -768,6 +810,11 @@ class StatementAnalyzer
         protected Scope visitCreateView(CreateView node, Optional<Scope> scope)
         {
             QualifiedObjectName viewName = createQualifiedObjectName(session, node, node.getName());
+            Optional<QualifiedObjectName> redirectedViewName = metadata.redirectTable(session, viewName);
+            if (redirectedViewName.isPresent()) {
+                viewName = redirectedViewName.get();
+                warningCollector.add(new PrestoWarning(REDIRECTED_TABLE, "Table redirection happened"));
+            }
             analysis.setUpdateType("CREATE VIEW", viewName);
 
             // analyze the query that creates the view
@@ -941,6 +988,11 @@ class StatementAnalyzer
         protected Scope visitCreateMaterializedView(CreateMaterializedView node, Optional<Scope> scope)
         {
             QualifiedObjectName viewName = createQualifiedObjectName(session, node, node.getName());
+            Optional<QualifiedObjectName> redirectedViewName = metadata.redirectTable(session, viewName);
+            if (redirectedViewName.isPresent()) {
+                viewName = redirectedViewName.get();
+                warningCollector.add(new PrestoWarning(REDIRECTED_TABLE, "Table redirection happened"));
+            }
             analysis.setUpdateType("CREATE MATERIALIZED VIEW", viewName);
 
             // analyze the query that creates the view
@@ -1172,6 +1224,11 @@ class StatementAnalyzer
             }
 
             QualifiedObjectName name = createQualifiedObjectName(session, table, table.getName());
+            Optional<QualifiedObjectName> redirectedName = metadata.redirectTable(session, name);
+            if (redirectedName.isPresent()) {
+                name = redirectedName.get();
+                warningCollector.add(new PrestoWarning(REDIRECTED_TABLE, "Table redirection happened"));
+            }
             analysis.addEmptyColumnReferencesForTable(accessControl, session.getIdentity(), name);
             Optional<TableHandle> tableHandle = metadata.getTableHandle(session, name);
 
@@ -1179,7 +1236,13 @@ class StatementAnalyzer
             Optional<QualifiedName> storageName = getMaterializedViewStorageTableName(name);
             Optional<TableHandle> storageHandle = Optional.empty();
             if (storageName.isPresent()) {
-                storageHandle = metadata.getTableHandle(session, createQualifiedObjectName(session, table, storageName.get()));
+                QualifiedObjectName storageObjectName = createQualifiedObjectName(session, table, storageName.get());
+                Optional<QualifiedObjectName> redirectedStorageObjectName = metadata.redirectTable(session, storageObjectName);
+                if (redirectedStorageObjectName.isPresent()) {
+                    storageObjectName = redirectedStorageObjectName.get();
+                    warningCollector.add(new PrestoWarning(REDIRECTED_TABLE, "Table redirection happened"));
+                }
+                storageHandle = metadata.getTableHandle(session, storageObjectName);
             }
 
             // If materialized view is current, answer the query using the storage table
@@ -1334,6 +1397,11 @@ class StatementAnalyzer
             if (statement instanceof CreateView) {
                 CreateView viewStatement = (CreateView) statement;
                 QualifiedObjectName viewNameFromStatement = createQualifiedObjectName(session, viewStatement, viewStatement.getName());
+                Optional<QualifiedObjectName> redirectedViewName = metadata.redirectTable(session, viewNameFromStatement);
+                if (redirectedViewName.isPresent()) {
+                    viewNameFromStatement = redirectedViewName.get();
+                    warningCollector.add(new PrestoWarning(REDIRECTED_TABLE, "Table redirection happened"));
+                }
                 if (viewStatement.isReplace() && viewNameFromStatement.equals(name)) {
                     throw semanticException(VIEW_IS_RECURSIVE, table, "Statement would create a recursive view");
                 }
@@ -1388,6 +1456,11 @@ class StatementAnalyzer
             if (statement instanceof CreateMaterializedView) {
                 CreateMaterializedView viewStatement = (CreateMaterializedView) statement;
                 QualifiedObjectName viewNameFromStatement = createQualifiedObjectName(session, viewStatement, viewStatement.getName());
+                Optional<QualifiedObjectName> redirectedViewName = metadata.redirectTable(session, viewNameFromStatement);
+                if (redirectedViewName.isPresent()) {
+                    viewNameFromStatement = redirectedViewName.get();
+                    warningCollector.add(new PrestoWarning(REDIRECTED_TABLE, "Table redirection happened"));
+                }
                 if (viewStatement.isReplace() && viewNameFromStatement.equals(name)) {
                     throw semanticException(VIEW_IS_RECURSIVE, table, "Statement would create a recursive materialized view");
                 }

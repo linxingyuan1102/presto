@@ -15,10 +15,12 @@ package io.prestosql.execution;
 
 import com.google.common.util.concurrent.ListenableFuture;
 import io.prestosql.Session;
+import io.prestosql.execution.warnings.WarningCollector;
 import io.prestosql.metadata.Metadata;
 import io.prestosql.metadata.QualifiedObjectName;
 import io.prestosql.metadata.TableHandle;
 import io.prestosql.security.AccessControl;
+import io.prestosql.spi.PrestoWarning;
 import io.prestosql.spi.connector.ColumnHandle;
 import io.prestosql.sql.tree.Expression;
 import io.prestosql.sql.tree.RenameColumn;
@@ -34,6 +36,7 @@ import static io.prestosql.spi.StandardErrorCode.COLUMN_ALREADY_EXISTS;
 import static io.prestosql.spi.StandardErrorCode.COLUMN_NOT_FOUND;
 import static io.prestosql.spi.StandardErrorCode.NOT_SUPPORTED;
 import static io.prestosql.spi.StandardErrorCode.TABLE_NOT_FOUND;
+import static io.prestosql.spi.connector.StandardWarningCode.REDIRECTED_TABLE;
 import static io.prestosql.sql.analyzer.SemanticExceptions.semanticException;
 import static java.util.Locale.ENGLISH;
 
@@ -47,10 +50,22 @@ public class RenameColumnTask
     }
 
     @Override
-    public ListenableFuture<?> execute(RenameColumn statement, TransactionManager transactionManager, Metadata metadata, AccessControl accessControl, QueryStateMachine stateMachine, List<Expression> parameters)
+    public ListenableFuture<?> execute(
+            RenameColumn statement,
+            TransactionManager transactionManager,
+            Metadata metadata,
+            AccessControl accessControl,
+            QueryStateMachine stateMachine,
+            List<Expression> parameters,
+            WarningCollector warningCollector)
     {
         Session session = stateMachine.getSession();
         QualifiedObjectName tableName = createQualifiedObjectName(session, statement, statement.getTable());
+        Optional<QualifiedObjectName> redirectedTableName = metadata.redirectTable(session, tableName);
+        if (redirectedTableName.isPresent()) {
+            tableName = redirectedTableName.get();
+            warningCollector.add(new PrestoWarning(REDIRECTED_TABLE, "Table redirection happened"));
+        }
         Optional<TableHandle> tableHandleOptional = metadata.getTableHandle(session, tableName);
         if (tableHandleOptional.isEmpty()) {
             if (!statement.isTableExists()) {
